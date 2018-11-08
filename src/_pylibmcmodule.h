@@ -132,6 +132,8 @@ typedef struct {
 /* {{{ Exceptions */
 static PyObject *PylibMCExc_Error;
 static PyObject *PylibMCExc_CacheMiss;
+static PyObject *PylibMCExc_EfsError;
+
 
 /* Mapping of memcached_return value -> Python exception object. */
 typedef struct {
