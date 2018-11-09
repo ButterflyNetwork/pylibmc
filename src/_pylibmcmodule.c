@@ -740,6 +740,7 @@ static ssize_t file_load(const char* key, char** file_val) {
     if (n == FILE_BUFSIZE) {
         return FILE_TOO_BIG;
     }
+    close(fd);
     return n;
 }
 
