@@ -744,7 +744,7 @@ static ssize_t efs_load(const char* key, char** efs_val) {
 }
 
 
-static PyObject *PylibMC_Client_get_efs(PylibMC_Client *self, PyObject *args) {
+static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
     char *mc_val;
     size_t val_size;
     uint32_t flags;
