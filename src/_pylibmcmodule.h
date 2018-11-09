@@ -289,6 +289,7 @@ static void PylibMC_ClientType_dealloc(PylibMC_Client *);
 static int PylibMC_Client_init(PylibMC_Client *, PyObject *, PyObject *);
 static PyObject *PylibMC_Client_deserialize(PylibMC_Client *, PyObject *arg);
 static PyObject *PylibMC_Client_serialize(PylibMC_Client *, PyObject *val);
+static PyObject *PylibMC_Client_get_efs(PylibMC_Client *, PyObject *arg);
 static PyObject *PylibMC_Client_get(PylibMC_Client *, PyObject *arg);
 static PyObject *PylibMC_Client_gets(PylibMC_Client *, PyObject *arg);
 static PyObject *PylibMC_Client_set(PylibMC_Client *, PyObject *, PyObject *);
@@ -359,6 +360,8 @@ static PyMethodDef PylibMC_ClientType_methods[] = {
     {"deserialize", (PyCFunction)PylibMC_Client_deserialize, METH_VARARGS,
         "Deserialize a bytestring and flag field retrieved from memcached. "
         "Raise pylibmc.CacheMiss to simulate a cache miss."},
+    {"get_efs", (PyCFunction)PylibMC_Client_get_efs, METH_VARARGS,
+         "Pull efs file through memcached."},
     {"get", (PyCFunction)PylibMC_Client_get, METH_VARARGS,
         "Retrieve a key from a memcached."},
     {"gets", (PyCFunction)PylibMC_Client_gets, METH_O,
