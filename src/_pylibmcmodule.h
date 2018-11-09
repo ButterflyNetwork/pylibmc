@@ -132,7 +132,7 @@ typedef struct {
 /* {{{ Exceptions */
 static PyObject *PylibMCExc_Error;
 static PyObject *PylibMCExc_CacheMiss;
-static PyObject *PylibMCExc_EfsError;
+static PyObject *PylibMCExc_FileError;
 
 
 /* Mapping of memcached_return value -> Python exception object. */
@@ -361,7 +361,7 @@ static PyMethodDef PylibMC_ClientType_methods[] = {
         "Deserialize a bytestring and flag field retrieved from memcached. "
         "Raise pylibmc.CacheMiss to simulate a cache miss."},
     {"get_file", (PyCFunction)PylibMC_Client_get_file, METH_VARARGS,
-         "Pull efs file through memcached."},
+         "Pull file file through memcached."},
     {"get", (PyCFunction)PylibMC_Client_get, METH_VARARGS,
         "Retrieve a key from a memcached."},
     {"gets", (PyCFunction)PylibMC_Client_gets, METH_O,

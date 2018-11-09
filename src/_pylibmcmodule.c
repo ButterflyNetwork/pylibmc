@@ -709,36 +709,36 @@ static int _PylibMC_cache_miss_simulated(PyObject *r) {
 }
 
 
-/* Error code for EFS files that are too big.
+/* Error code for files that are too big.
  * Not sure where best to put this, and figured to keep it local.
  * See comments on following method.
  */
-#define EFS_TOO_BIG -6666
+#define FILE_TOO_BIG -6666
 
-/* Pull through-EFS function for files if memcached retrieval fails.
+/* Pull through-FILE function for files if memcached retrieval fails.
  *
- * EFS retrieval fails if the file is too large. We expect reasonably sized
+ * FILE retrieval fails if the file is too large. We expect reasonably sized
  * PNGs along this code path, something like 8-bit, 300X400 images or 12K.
  * The max allocated buffer size of 1MiB is plenty big for these.
  * Larger files should use a different loading mechanism. We throw an
  * exception if these show up.
  */
-static ssize_t efs_load(const char* key, char** efs_val) {
-    const int EFS_BUFSIZE = 1024 * 1024;
+static ssize_t file_load(const char* key, char** file_val) {
+    const int FILE_BUFSIZE = 1024 * 1024;
     int fd;
     ssize_t n;
 
-    if ((*efs_val = malloc(EFS_BUFSIZE)) == NULL) {
+    if ((*file_val = malloc(FILE_BUFSIZE)) == NULL) {
         return -1;
     }
     if ((fd = open(key, O_RDONLY)) < 0) {
         return -1;
     }
-    if ((n = read(fd, *efs_val, EFS_BUFSIZE)) < 0) {
+    if ((n = read(fd, *file_val, FILE_BUFSIZE)) < 0) {
         return -1;
     }
-    if (n == EFS_BUFSIZE) {
-        return EFS_TOO_BIG;
+    if (n == FILE_BUFSIZE) {
+        return FILE_TOO_BIG;
     }
     return n;
 }
@@ -754,9 +754,9 @@ static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
        at this point, so borrow a reference to Py_None as well for parity. */
     PyObject *default_value = Py_None;
 
-    /* EFS variables */
-    char *efs_val = NULL;
-    ssize_t efs_size = 0;
+    /* FILE variables */
+    char *file_val = NULL;
+    ssize_t file_size = 0;
 
     if (!PyArg_UnpackTuple(args, "get", 1, 2, &key, &default_value)) {
         return NULL;
@@ -772,18 +772,18 @@ static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
     mc_val = memcached_get(self->mc,
             PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
             &val_size, &flags, &error);
-    /* begin - fall through to EFS */
+    /* begin - fall through to FILE */
     if (mc_val == NULL) {
-        efs_size = efs_load(PyBytes_AS_STRING(key), &efs_val);
-        if (efs_size > 0) {
+        file_size = file_load(PyBytes_AS_STRING(key), &file_val);
+        if (file_size > 0) {
             /* Write back to cache before returning.
              * TODO do we need flags and error here below?
              */
             memcached_set(self->mc, PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
-                          efs_val, (size_t) efs_size, 0, 0);
+                          file_val, (size_t) file_size, 0, 0);
         }
     }
-    /* end - fall through to EFS */
+    /* end - fall through to FILE */
     Py_END_ALLOW_THREADS;
     Py_DECREF(key);
     if (mc_val != NULL) {
@@ -796,22 +796,22 @@ static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
         return r;
     }
     else if (error == MEMCACHED_NOTFOUND) {
-        if (efs_size > 0) {
-            PyObject* r = PyBytes_FromStringAndSize(efs_val, efs_size);
-            free(efs_val);
+        if (file_size > 0) {
+            PyObject* r = PyBytes_FromStringAndSize(file_val, file_size);
+            free(file_val);
             return r;
         }
         else {
-            if (efs_size == EFS_TOO_BIG) {
-                PyErr_SetString(PylibMCExc_EfsError,
+            if (file_size == FILE_TOO_BIG) {
+                PyErr_SetString(PylibMCExc_FileError,
                                 "File too large for Pull-Through Cache. "
                                 "Please use another file loader.");
             } else {
-                PyErr_SetString(PylibMCExc_EfsError,
-                                "EFS File Access/Read Error");
+                PyErr_SetString(PylibMCExc_FileError,
+                                "File Access/Read Error");
             }
-            if (efs_val != NULL) {
-                free(efs_val);
+            if (file_val != NULL) {
+                free(file_val);
             }
             return NULL;
         }
@@ -2768,8 +2768,8 @@ static void _make_excs(PyObject *module) {
     PylibMCExc_CacheMiss = PyErr_NewException(
             "pylibmc.CacheMiss", PylibMCExc_Error, NULL);
 
-    PylibMCExc_EfsError = PyErr_NewException(
-            "pylibmc.EfsError", PylibMCExc_Error, NULL);
+    PylibMCExc_FileError = PyErr_NewException(
+            "pylibmc.FileError", PylibMCExc_Error, NULL);
 
     exc_objs = PyList_New(0);
     PyList_Append(exc_objs,
@@ -2777,7 +2777,7 @@ static void _make_excs(PyObject *module) {
     PyList_Append(exc_objs,
                   Py_BuildValue("sO", "CacheMiss", (PyObject *)PylibMCExc_CacheMiss));
     PyList_Append(exc_objs,
-                  Py_BuildValue("sO", "EfsError", (PyObject *)PylibMCExc_EfsError));
+                  Py_BuildValue("sO", "FileError", (PyObject *)PylibMCExc_FileError));
 
     for (err = PylibMCExc_mc_errs; err->name != NULL; err++) {
         char excnam[64];
@@ -2795,8 +2795,8 @@ static void _make_excs(PyObject *module) {
     PyModule_AddObject(module, "CacheMiss",
                        (PyObject *)PylibMCExc_CacheMiss);
 
-    PyModule_AddObject(module, "EfsError",
-                       (PyObject *)PylibMCExc_EfsError);
+    PyModule_AddObject(module, "FileError",
+                       (PyObject *)PylibMCExc_FileError);
 
 
     /* Backwards compatible name for <= pylibmc 1.2.3
@@ -2804,7 +2804,7 @@ static void _make_excs(PyObject *module) {
      * Need to increase the refcount since we're adding another
      * reference to the exception class. Otherwise, debug builds
      * of Python dump core with
-     * Modules/gcmodule.c:379: visit_decref: Assertion `((gc)->gc.gc_refs >> (1)) != 0' failed.
+     * Modules/gcmodule.c:379: visit_decref: Assertion `((gc)->gc.gc_rfile >> (1)) != 0' failed.
      */
     Py_INCREF(PylibMCExc_Error);
     PyModule_AddObject(module, "MemcachedError",
