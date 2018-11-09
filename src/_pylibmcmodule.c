@@ -31,6 +31,7 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
+#include <fcntl.h>
 #include "_pylibmcmodule.h"
 #ifdef USE_ZLIB
 #  include <zlib.h>
@@ -707,6 +708,124 @@ static int _PylibMC_cache_miss_simulated(PyObject *r) {
     return 0;
 }
 
+
+/* Error code for EFS files that are too big.
+ * Not sure where best to put this, and figured to keep it local.
+ * See comments on following method.
+ */
+#define EFS_TOO_BIG -6666
+
+/* Pull through-EFS function for files if memcached retrieval fails.
+ *
+ * EFS retrieval fails if the file is too large. We expect reasonably sized
+ * PNGs along this code path, something like 8-bit, 300X400 images or 12K.
+ * The max allocated buffer size of 1MiB is plenty big for these.
+ * Larger files should use a different loading mechanism. We throw an
+ * exception if these show up.
+ */
+static ssize_t efs_load(const char* key, char** efs_val) {
+    const int EFS_BUFSIZE = 1024 * 1024;
+    int fd;
+    ssize_t n;
+
+    if ((*efs_val = malloc(EFS_BUFSIZE)) == NULL) {
+        return -1;
+    }
+    if ((fd = open(key, O_RDONLY)) < 0) {
+        return -1;
+    }
+    if ((n = read(fd, *efs_val, EFS_BUFSIZE)) < 0) {
+        return -1;
+    }
+    if (n == EFS_BUFSIZE) {
+        return EFS_TOO_BIG;
+    }
+    return n;
+}
+
+
+static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
+    char *mc_val;
+    size_t val_size;
+    uint32_t flags;
+    memcached_return error;
+    PyObject *key;
+    /* if a default argument was in fact passed, it's still a borrowed reference
+       at this point, so borrow a reference to Py_None as well for parity. */
+    PyObject *default_value = Py_None;
+
+    /* EFS variables */
+    char *efs_val = NULL;
+    ssize_t efs_size = 0;
+
+    if (!PyArg_UnpackTuple(args, "get", 1, 2, &key, &default_value)) {
+        return NULL;
+    }
+
+    if (!_key_normalized_obj(&key)) {
+        return NULL;
+    } else if (!PySequence_Length(key) ) {
+        Py_INCREF(default_value);
+        return default_value;
+    }
+    Py_BEGIN_ALLOW_THREADS;
+    mc_val = memcached_get(self->mc,
+            PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
+            &val_size, &flags, &error);
+    /* begin - fall through to EFS */
+    if (mc_val == NULL) {
+        efs_size = efs_load(PyBytes_AS_STRING(key), &efs_val);
+        if (efs_size > 0) {
+            /* Write back to cache before returning.
+             * TODO do we need flags and error here below?
+             */
+            memcached_set(self->mc, PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
+                          efs_val, (size_t) efs_size, 0, 0);
+        }
+    }
+    /* end - fall through to EFS */
+    Py_END_ALLOW_THREADS;
+    Py_DECREF(key);
+    if (mc_val != NULL) {
+        PyObject *r = _PylibMC_parse_memcached_value(self, mc_val, val_size, flags);
+        free(mc_val);
+        if (_PylibMC_cache_miss_simulated(r)) {
+            Py_INCREF(default_value);
+            return default_value;
+        }
+        return r;
+    }
+    else if (error == MEMCACHED_NOTFOUND) {
+        if (efs_size > 0) {
+            PyObject* r = PyBytes_FromStringAndSize(efs_val, efs_size);
+            free(efs_val);
+            return r;
+        }
+        else {
+            if (efs_size == EFS_TOO_BIG) {
+                PyErr_SetString(PylibMCExc_EfsError,
+                                "File too large for Pull-Through Cache. "
+                                "Please use another file loader.");
+            } else {
+                PyErr_SetString(PylibMCExc_EfsError,
+                                "EFS File Access/Read Error");
+            }
+            if (efs_val != NULL) {
+                free(efs_val);
+            }
+            return NULL;
+        }
+    }
+    else if (error == MEMCACHED_SUCCESS) {
+        /* This happens for empty values, and so we fake an empty string. */
+        return PyBytes_FromStringAndSize("", 0);
+    }
+    return PylibMC_ErrFromMemcachedWithKey(self, "memcached_get", error,
+                                           PyBytes_AS_STRING(key),
+                                           PyBytes_GET_SIZE(key));
+}
+
+
 static PyObject *PylibMC_Client_get(PylibMC_Client *self, PyObject *args) {
     char *mc_val;
     size_t val_size;
@@ -723,31 +842,36 @@ static PyObject *PylibMC_Client_get(PylibMC_Client *self, PyObject *args) {
 
     if (!_key_normalized_obj(&key)) {
         return NULL;
-    } else if (!PySequence_Length(key) ) {
+    } else if (!PySequence_Length(key)) {
         Py_INCREF(default_value);
         return default_value;
     }
 
     Py_BEGIN_ALLOW_THREADS;
-    mc_val = memcached_get(self->mc,
-            PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
-            &val_size, &flags, &error);
+        mc_val = memcached_get(self->mc,
+                               PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
+                               &val_size, &flags, &error);
     Py_END_ALLOW_THREADS;
 
     Py_DECREF(key);
 
-    if (mc_val != NULL) {
+    if (error == MEMCACHED_SUCCESS) {
+        /* note that mc_val can and is NULL for zero-length values. */
         PyObject *r = _PylibMC_parse_memcached_value(self, mc_val, val_size, flags);
-        free(mc_val);
+
+        if (mc_val != NULL) {
+            free(mc_val);
+        }
+
         if (_PylibMC_cache_miss_simulated(r)) {
             Py_INCREF(default_value);
             return default_value;
         }
+
         return r;
-    } else if (error == MEMCACHED_SUCCESS) {
-        /* This happens for empty values, and so we fake an empty string. */
-        return PyBytes_FromStringAndSize("", 0);
-    } else if (error == MEMCACHED_NOTFOUND) {
+    }
+
+    if (error == MEMCACHED_NOTFOUND) {
         Py_INCREF(default_value);
         return default_value;
     }
@@ -756,6 +880,7 @@ static PyObject *PylibMC_Client_get(PylibMC_Client *self, PyObject *args) {
                                            PyBytes_AS_STRING(key),
                                            PyBytes_GET_SIZE(key));
 }
+
 
 static PyObject *PylibMC_Client_gets(PylibMC_Client *self, PyObject *arg) {
     const char* keys[2];
@@ -2620,7 +2745,6 @@ static int _check_libmemcached_version(void) {
         dot = tmp;
         *dot = 0;
     }
-
     maj = atoi(ver);
     min = atoi(dot + 1);
 
@@ -2644,11 +2768,16 @@ static void _make_excs(PyObject *module) {
     PylibMCExc_CacheMiss = PyErr_NewException(
             "pylibmc.CacheMiss", PylibMCExc_Error, NULL);
 
+    PylibMCExc_EfsError = PyErr_NewException(
+            "pylibmc.EfsError", PylibMCExc_Error, NULL);
+
     exc_objs = PyList_New(0);
     PyList_Append(exc_objs,
                   Py_BuildValue("sO", "Error", (PyObject *)PylibMCExc_Error));
     PyList_Append(exc_objs,
                   Py_BuildValue("sO", "CacheMiss", (PyObject *)PylibMCExc_CacheMiss));
+    PyList_Append(exc_objs,
+                  Py_BuildValue("sO", "EfsError", (PyObject *)PylibMCExc_EfsError));
 
     for (err = PylibMCExc_mc_errs; err->name != NULL; err++) {
         char excnam[64];
@@ -2665,6 +2794,10 @@ static void _make_excs(PyObject *module) {
 
     PyModule_AddObject(module, "CacheMiss",
                        (PyObject *)PylibMCExc_CacheMiss);
+
+    PyModule_AddObject(module, "EfsError",
+                       (PyObject *)PylibMCExc_EfsError);
+
 
     /* Backwards compatible name for <= pylibmc 1.2.3
      *
