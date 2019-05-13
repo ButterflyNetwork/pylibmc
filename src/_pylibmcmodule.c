@@ -761,7 +761,7 @@ static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
     const char* key_ptr = PyBytes_AS_STRING(key);
 
     file_val = memcached_get(self->mc, key_ptr, (size_t) key_size, &file_size, &flags, &error);
-    if (file_val == NULL) {
+    if ((file_val == NULL) && (error == MEMCACHED_NOTFOUND )) {
         file_val = file_load(key_ptr, &file_size);
         if (file_val != NULL) {
             memcached_set(self->mc, key_ptr, (size_t) key_size, file_val, file_size, 0, 0);
@@ -781,11 +781,19 @@ static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
         free(file_val);
         return r;
     }
-    if (errno == ENOENT) {
-        PyErr_SetString(PylibMCExc_FileNotFoundError, strerror(errno));
+    if (error == MEMCACHED_NOTFOUND) {
+        /* cache is connecting, so something wrong with file retrieval */
+        if (errno == ENOENT) {
+            PyErr_SetString(PylibMCExc_FileNotFoundError, strerror(errno));
+        } else {
+            PyErr_SetString(PylibMCExc_FileError, strerror(errno));
+        }
     } else {
-        PyErr_SetString(PylibMCExc_FileError, strerror(errno));
-    }
+        /* cache is likely down */
+        return PylibMC_ErrFromMemcachedWithKey(self, "memcached_get", error,
+                                               PyBytes_AS_STRING(key),
+                                               PyBytes_GET_SIZE(key));
+    };
     return NULL;
 }
 
