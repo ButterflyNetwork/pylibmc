@@ -709,6 +709,34 @@ static int _PylibMC_cache_miss_simulated(PyObject *r) {
 }
 
 
+/*
+ * Hack replacement of "(Internal)" path with escaped version to avoid barfing on bad png path choice.
+ */
+static const char* escape_path(const char* key, char* escape_key) {
+    static char _esc_pattern[] = "(Internal)";
+    static char _esc_replace[] = "\\(Internal\\)";
+    static size_t _esc_pattern_length = 10
+    static size_t _esc_replace_length = 12;
+
+    const char* offset = strstr(key, _esc_pattern);
+
+    if (offset != NULL)  {
+        size_t first_chunk_length = offset - key;
+        size_t final_chunk_length = strlen(key) - first_chunk_length - _esc_pattern_length + 1;
+
+        memcpy(escape_key, key, first_chunk_length);
+        memcpy(&escape_key[first_chunk_length], _esc_replace, _esc_replace_length);
+        memcpy(
+                &escape_key[first_chunk_length + _esc_replace_length],
+                offset + _esc_pattern_length ,
+                final_chunk_length
+        );
+        return escape_key;
+    }
+    else return key;
+}
+
+
 /* Error code for files that are too big.
  * Not sure where best to put this, and figured to keep it local.
  * See comments on following method.
@@ -731,7 +759,8 @@ static ssize_t file_load(const char* key, char** file_val) {
     if ((*file_val = malloc(FILE_BUFSIZE)) == NULL) {
         return -1;
     }
-    if ((fd = open(key, O_RDONLY)) < 0) {
+    escape_key = char[256];
+    if ((fd = open(escape_path(key, escape_key), O_RDONLY)) < 0) {
         return -1;
     }
     if ((n = read(fd, *file_val, FILE_BUFSIZE)) < 0) {
