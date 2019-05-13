@@ -133,6 +133,7 @@ typedef struct {
 static PyObject *PylibMCExc_Error;
 static PyObject *PylibMCExc_CacheMiss;
 static PyObject *PylibMCExc_FileError;
+static PyObject *PylibMCExc_FileNotFoundError;
 
 
 /* Mapping of memcached_return value -> Python exception object. */

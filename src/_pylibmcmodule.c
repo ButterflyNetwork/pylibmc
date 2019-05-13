@@ -709,39 +709,7 @@ static int _PylibMC_cache_miss_simulated(PyObject *r) {
 }
 
 
-/*
- * Hack replacement of "(Internal)" path with escaped version to avoid barfing on bad png path choice.
- */
-static const char* escape_path(const char* key, char* escape_key) {
-    static char _esc_pattern[] = "(Internal)";
-    static char _esc_replace[] = "\\(Internal\\)";
-    static size_t _esc_pattern_length = 10;
-    static size_t _esc_replace_length = 12;
-
-    const char* offset = strstr(key, _esc_pattern);
-
-    if (offset != NULL)  {
-        size_t first_chunk_length = offset - key;
-        size_t final_chunk_length = strlen(key) - first_chunk_length - _esc_pattern_length + 1;
-
-        memcpy(escape_key, key, first_chunk_length);
-        memcpy(&escape_key[first_chunk_length], _esc_replace, _esc_replace_length);
-        memcpy(
-                &escape_key[first_chunk_length + _esc_replace_length],
-                offset + _esc_pattern_length ,
-                final_chunk_length
-        );
-        return escape_key;
-    }
-    else return key;
-}
-
-
-/* Error code for files that are too big.
- * Not sure where best to put this, and figured to keep it local.
- * See comments on following method.
- */
-#define FILE_TOO_BIG -6666
+static size_t MAX_FILE_BUFSIZE = 1024 * 1024;
 
 /* Pull through-FILE function for files if memcached retrieval fails.
  *
@@ -751,32 +719,24 @@ static const char* escape_path(const char* key, char* escape_key) {
  * Larger files should use a different loading mechanism. We throw an
  * exception if these show up.
  */
-static ssize_t file_load(const char* key, char** file_val) {
-    const int FILE_BUFSIZE = 1024 * 1024;
-    int fd;
-    ssize_t n;
+static char* file_load(const char* key, ssize_t* file_size) {
 
-    if ((*file_val = malloc(FILE_BUFSIZE)) == NULL) {
-        return -1;
+    int fd;
+    char* file_val = NULL;
+
+    if (((fd = open(key, O_RDONLY)) < 0) ||
+        ((file_val = malloc(MAX_FILE_BUFSIZE)) == NULL) ||
+        ((*file_size = read(fd, file_val, MAX_FILE_BUFSIZE)) < 0)) {
+            if (file_val) free(file_val);
     }
-    char escape_key[256];
-    if ((fd = open(escape_path(key, escape_key), O_RDONLY)) < 0) {
-        return -1;
-    }
-    if ((n = read(fd, *file_val, FILE_BUFSIZE)) < 0) {
-        return -1;
-    }
-    if (n == FILE_BUFSIZE) {
-        return FILE_TOO_BIG;
-    }
-    close(fd);
-    return n;
+    if (fd >= 0) close(fd);
+    return file_val;
 }
 
 
 static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
-    char *mc_val;
-    size_t val_size;
+    char *file_val;
+    size_t file_size;
     uint32_t flags;
     memcached_return error;
     PyObject *key;
@@ -784,9 +744,6 @@ static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
        at this point, so borrow a reference to Py_None as well for parity. */
     PyObject *default_value = Py_None;
 
-    /* FILE variables */
-    char *file_val = NULL;
-    ssize_t file_size = 0;
 
     if (!PyArg_UnpackTuple(args, "get", 1, 2, &key, &default_value)) {
         return NULL;
@@ -799,60 +756,37 @@ static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
         return default_value;
     }
     Py_BEGIN_ALLOW_THREADS;
-    mc_val = memcached_get(self->mc,
-            PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
-            &val_size, &flags, &error);
-    /* begin - fall through to FILE */
-    if (mc_val == NULL) {
-        file_size = file_load(PyBytes_AS_STRING(key), &file_val);
-        if (file_size > 0) {
-            /* Write back to cache before returning.
-             * TODO do we need flags and error here below?
-             */
-            memcached_set(self->mc, PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
-                          file_val, (size_t) file_size, 0, 0);
+
+    Py_ssize_t key_size = PyBytes_GET_SIZE(key);
+    const char* key_ptr = PyBytes_AS_STRING(key);
+
+    file_val = memcached_get(self->mc, key_ptr, (size_t) key_size, &file_size, &flags, &error);
+    if (file_val == NULL) {
+        file_val = file_load(key_ptr, &file_size);
+        if (file_val != NULL) {
+            memcached_set(self->mc, key_ptr, (size_t) key_size, file_val, file_size, 0, 0);
         }
     }
-    /* end - fall through to FILE */
     Py_END_ALLOW_THREADS;
     Py_DECREF(key);
-    if (mc_val != NULL) {
-        PyObject *r = _PylibMC_parse_memcached_value(self, mc_val, val_size, flags);
-        free(mc_val);
-        if (_PylibMC_cache_miss_simulated(r)) {
-            Py_INCREF(default_value);
-            return default_value;
-        }
+
+    if (file_size == MAX_FILE_BUFSIZE) {
+        PyErr_SetString(PylibMCExc_FileError, "Files too large (>1M).");
+        free(file_val);
+        return NULL;
+    }
+
+    if (file_val != NULL) {
+        PyObject* r = PyBytes_FromStringAndSize(file_val, file_size);
+        free(file_val);
         return r;
     }
-    else if (error == MEMCACHED_NOTFOUND) {
-        if (file_size > 0) {
-            PyObject* r = PyBytes_FromStringAndSize(file_val, file_size);
-            free(file_val);
-            return r;
-        }
-        else {
-            if (file_size == FILE_TOO_BIG) {
-                PyErr_SetString(PylibMCExc_FileError,
-                                "File too large for Pull-Through Cache. "
-                                "Please use another file loader.");
-            } else {
-                PyErr_SetString(PylibMCExc_FileError,
-                                "File Access/Read Error");
-            }
-            if (file_val != NULL) {
-                free(file_val);
-            }
-            return NULL;
-        }
+    if (errno == ENOENT) {
+        PyErr_SetString(PylibMCExc_FileNotFoundError, strerror(errno));
+    } else {
+        PyErr_SetString(PylibMCExc_FileError, strerror(errno));
     }
-    else if (error == MEMCACHED_SUCCESS) {
-        /* This happens for empty values, and so we fake an empty string. */
-        return PyBytes_FromStringAndSize("", 0);
-    }
-    return PylibMC_ErrFromMemcachedWithKey(self, "memcached_get", error,
-                                           PyBytes_AS_STRING(key),
-                                           PyBytes_GET_SIZE(key));
+    return NULL;
 }
 
 
@@ -2801,6 +2735,9 @@ static void _make_excs(PyObject *module) {
     PylibMCExc_FileError = PyErr_NewException(
             "pylibmc.FileError", PylibMCExc_Error, NULL);
 
+    PylibMCExc_FileNotFoundError = PyErr_NewException(
+            "pylibmc.FileNotFoundError", PylibMCExc_Error, NULL);
+
     exc_objs = PyList_New(0);
     PyList_Append(exc_objs,
                   Py_BuildValue("sO", "Error", (PyObject *)PylibMCExc_Error));
@@ -2808,6 +2745,9 @@ static void _make_excs(PyObject *module) {
                   Py_BuildValue("sO", "CacheMiss", (PyObject *)PylibMCExc_CacheMiss));
     PyList_Append(exc_objs,
                   Py_BuildValue("sO", "FileError", (PyObject *)PylibMCExc_FileError));
+    PyList_Append(exc_objs,
+                  Py_BuildValue("sO", "FileNotFoundError", (PyObject *)PylibMCExc_FileNotFoundError));
+
 
     for (err = PylibMCExc_mc_errs; err->name != NULL; err++) {
         char excnam[64];
@@ -2827,6 +2767,9 @@ static void _make_excs(PyObject *module) {
 
     PyModule_AddObject(module, "FileError",
                        (PyObject *)PylibMCExc_FileError);
+
+    PyModule_AddObject(module, "FileNotFoundError",
+                       (PyObject *)PylibMCExc_FileNotFoundError);
 
 
     /* Backwards compatible name for <= pylibmc 1.2.3
