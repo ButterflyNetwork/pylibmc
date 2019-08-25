@@ -31,8 +31,8 @@
  * POSSIBILITY OF SUCH DAMAGE.
  */
 
-#include <fcntl.h>
 #include "_pylibmcmodule.h"
+#include <fcntl.h>
 #ifdef USE_ZLIB
 #  include <zlib.h>
 #  define ZLIB_BUFSZ (1 << 14)
@@ -764,8 +764,10 @@ static PyObject *PylibMC_Client_get_file(PylibMC_Client *self, PyObject *args) {
 
     file_val = memcached_get(self->mc, key_ptr, (size_t) key_size, &file_size, &flags, &error);
     if ((file_val == NULL) && (error == MEMCACHED_NOTFOUND )) {
-        file_val = file_load(key_ptr, &file_size);
+        ssize_t ufile_size;
+        file_val = file_load(key_ptr, &ufile_size);
         if (file_val != NULL) {
+	    file_size = (size_t)ufile_size;
             memcached_set(self->mc, key_ptr, (size_t) key_size, file_val, file_size, 0, 0);
         }
     }
@@ -822,9 +824,9 @@ static PyObject *PylibMC_Client_get(PylibMC_Client *self, PyObject *args) {
     }
 
     Py_BEGIN_ALLOW_THREADS;
-        mc_val = memcached_get(self->mc,
-                               PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
-                               &val_size, &flags, &error);
+    mc_val = memcached_get(self->mc,
+            PyBytes_AS_STRING(key), PyBytes_GET_SIZE(key),
+            &val_size, &flags, &error);
     Py_END_ALLOW_THREADS;
 
     Py_DECREF(key);
@@ -2802,7 +2804,7 @@ static void _make_excs(PyObject *module) {
      * Need to increase the refcount since we're adding another
      * reference to the exception class. Otherwise, debug builds
      * of Python dump core with
-     * Modules/gcmodule.c:379: visit_decref: Assertion `((gc)->gc.gc_rfile >> (1)) != 0' failed.
+     * Modules/gcmodule.c:379: visit_decref: Assertion `((gc)->gc.gc_refs >> (1)) != 0' failed.
      */
     Py_INCREF(PylibMCExc_Error);
     PyModule_AddObject(module, "MemcachedError",
